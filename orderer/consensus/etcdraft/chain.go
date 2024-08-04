@@ -573,28 +573,24 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 type LogEntry struct {
     Index     int
     Term      int
-    Command   []byte // Command should be in bytes to send over gRPC
-    // Other necessary fields
-}
+    Command   []byte
 
 type Peer struct {
     ID   string
     Addr string
-    // Other necessary fields
 }
 
 type RaftNode struct {
     peers       []*Peer
     log         []LogEntry
-    nextIndex   map[*Peer]int // Next index to send to each peer
-    matchIndex  map[*Peer]int // Highest log entry known to be replicated on each peer
+    nextIndex   map[*Peer]int
+    matchIndex  map[*Peer]int
     commitIndex int
-    // Other necessary fields...
 }
 
 func (r *RaftNode) sendAppendEntriesBatch() {
     var wg sync.WaitGroup
-    entriesBatch := r.getLogEntriesBatch() // Get a batch of log entries to send
+    entriesBatch := r.getLogEntriesBatch()
     for _, peer := range r.peers {
         wg.Add(1)
         go func(peer *Peer) {
@@ -606,7 +602,7 @@ func (r *RaftNode) sendAppendEntriesBatch() {
 }
 
 func (r *RaftNode) getLogEntriesBatch() []LogEntry {
-    var batchSize = 10 // Define a suitable batch size
+    var batchSize = 10
     var entriesBatch []LogEntry
 
     for i := r.commitIndex + 1; i < r.commitIndex+1+batchSize && i < len(r.log); i++ {
@@ -629,7 +625,6 @@ func (r *RaftNode) handleAppendEntriesBatch(entriesBatch []LogEntry) {
 }
 
 func (r *RaftNode) processLogEntry(entry LogEntry) {
-    // Process each log entry (e.g., validate, append to log, etc.)
     r.log = append(r.log, entry)
     if entry.Index > r.commitIndex {
         r.commitIndex = entry.Index
@@ -649,15 +644,12 @@ func (r *RaftNode) sendAppendEntries(peer *Peer, entries []LogEntry) {
     response := sendAppendEntriesRPC(peer, request)
 
     if response.Success {
-        // Update nextIndex and matchIndex for the peer
         r.nextIndex[peer] = entries[len(entries)-1].Index + 1
         r.matchIndex[peer] = entries[len(entries)-1].Index
     } else if response.Term > r.currentTerm {
-        // Handle term out-of-date (step down as leader)
         r.currentTerm = response.Term
         r.becomeFollower()
     } else {
-        // Decrement nextIndex and retry
         r.nextIndex[peer]--
         r.sendAppendEntries(peer, r.getLogEntriesBatch())
     }
