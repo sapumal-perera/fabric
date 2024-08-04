@@ -570,6 +570,141 @@ func (c *Chain) Submit(req *orderer.SubmitRequest, sender uint64) error {
 	return nil
 }
 
+type LogEntry struct {
+    Index     int
+    Term      int
+    Command   []byte // Command should be in bytes to send over gRPC
+    // Other necessary fields
+}
+
+type Peer struct {
+    ID   string
+    Addr string
+    // Other necessary fields
+}
+
+type RaftNode struct {
+    peers       []*Peer
+    log         []LogEntry
+    nextIndex   map[*Peer]int // Next index to send to each peer
+    matchIndex  map[*Peer]int // Highest log entry known to be replicated on each peer
+    commitIndex int
+    // Other necessary fields...
+}
+
+func (r *RaftNode) sendAppendEntriesBatch() {
+    var wg sync.WaitGroup
+    entriesBatch := r.getLogEntriesBatch() // Get a batch of log entries to send
+    for _, peer := range r.peers {
+        wg.Add(1)
+        go func(peer *Peer) {
+            defer wg.Done()
+            r.sendAppendEntries(peer, entriesBatch)
+        }(peer)
+    }
+    wg.Wait()
+}
+
+func (r *RaftNode) getLogEntriesBatch() []LogEntry {
+    var batchSize = 10 // Define a suitable batch size
+    var entriesBatch []LogEntry
+
+    for i := r.commitIndex + 1; i < r.commitIndex+1+batchSize && i < len(r.log); i++ {
+        entriesBatch = append(entriesBatch, r.log[i])
+    }
+
+    return entriesBatch
+}
+
+func (r *RaftNode) handleAppendEntriesBatch(entriesBatch []LogEntry) {
+    var wg sync.WaitGroup
+    for _, entry := range entriesBatch {
+        wg.Add(1)
+        go func(entry LogEntry) {
+            defer wg.Done()
+            r.processLogEntry(entry)
+        }(entry)
+    }
+    wg.Wait()
+}
+
+func (r *RaftNode) processLogEntry(entry LogEntry) {
+    // Process each log entry (e.g., validate, append to log, etc.)
+    r.log = append(r.log, entry)
+    if entry.Index > r.commitIndex {
+        r.commitIndex = entry.Index
+    }
+}
+
+func (r *RaftNode) sendAppendEntries(peer *Peer, entries []LogEntry) {
+    request := AppendEntriesRequest{
+        Term:         r.currentTerm,
+        LeaderId:     r.me,
+        PrevLogIndex: entries[0].Index - 1,
+        PrevLogTerm:  entries[0].Term,
+        Entries:      entries,
+        LeaderCommit: r.commitIndex,
+    }
+
+    response := sendAppendEntriesRPC(peer, request)
+
+    if response.Success {
+        // Update nextIndex and matchIndex for the peer
+        r.nextIndex[peer] = entries[len(entries)-1].Index + 1
+        r.matchIndex[peer] = entries[len(entries)-1].Index
+    } else if response.Term > r.currentTerm {
+        // Handle term out-of-date (step down as leader)
+        r.currentTerm = response.Term
+        r.becomeFollower()
+    } else {
+        // Decrement nextIndex and retry
+        r.nextIndex[peer]--
+        r.sendAppendEntries(peer, r.getLogEntriesBatch())
+    }
+}
+
+func sendAppendEntriesRPC(peer *Peer, request AppendEntriesRequest) AppendEntriesResponse {
+    conn, err := grpc.Dial(peer.Addr, grpc.WithInsecure(), grpc.WithBlock())
+    if err != nil {
+        log.Fatalf("Did not connect: %v", err)
+    }
+    defer conn.Close()
+    c := pb.NewRaftClient(conn)
+
+    ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+    defer cancel()
+
+    req := &pb.AppendEntriesRequest{
+        Term:         request.Term,
+        LeaderId:     request.LeaderId,
+        PrevLogIndex: request.PrevLogIndex,
+        PrevLogTerm:  request.PrevLogTerm,
+        Entries:      convertLogEntries(request.Entries),
+        LeaderCommit: request.LeaderCommit,
+    }
+
+    res, err := c.AppendEntries(ctx, req)
+    if err != nil {
+        log.Fatalf("Could not send AppendEntries: %v", err)
+    }
+    return AppendEntriesResponse{
+        Term:    res.Term,
+        Success: res.Success,
+    }
+}
+
+func convertLogEntries(entries []LogEntry) []*pb.LogEntry {
+    var pbEntries []*pb.LogEntry
+    for _, entry := range entries {
+        pbEntries = append(pbEntries, &pb.LogEntry{
+            Index:   entry.Index,
+            Term:    entry.Term,
+            Command: entry.Command,
+        })
+    }
+    return pbEntries
+}
+
 func (c *Chain) forwardToLeader(lead uint64, req *orderer.SubmitRequest) error {
 	c.logger.Infof("Forwarding transaction to the leader %d", lead)
 	timer := time.NewTimer(c.opts.RPCTimeout)
